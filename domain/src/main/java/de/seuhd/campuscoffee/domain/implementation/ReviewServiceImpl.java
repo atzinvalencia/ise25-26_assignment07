@@ -11,6 +11,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import de.seuhd.campuscoffee.domain.exceptions.ValidationException;
+import de.seuhd.campuscoffee.domain.exceptions.NotFoundException;
 
 import java.util.List;
 
@@ -45,10 +47,31 @@ public class ReviewServiceImpl extends CrudServiceImpl<Review, Long> implements 
     @Override
     @Transactional
     public @NonNull Review upsert(@NonNull Review review) {
-        // TODO: Implement the missing business logic here
+        // 1) Validate that the POS exists (throws NotFoundException if not)
+        var pos = posDataService.getById(review.pos().getId());
 
-        return super.upsert(review);
+        // 2) Ensure the user has at most one review per POS
+        //    Allow update of the same review (same id), but not a second one.
+        var existingReviews = reviewDataService.filter(pos, review.author());
+
+        boolean anotherReviewExists = existingReviews.stream()
+                .anyMatch(existing ->
+                        existing.id() != null
+                                && (review.id() == null || !existing.id().equals(review.id()))
+                );
+
+        if (anotherReviewExists) {
+            throw new ValidationException("User already created a review for this POS");
+        }
+
+        // 3) Use the persisted POS instance in the review and delegate to base upsert
+        var reviewToSave = review.toBuilder()
+                .pos(pos)
+                .build();
+
+        return super.upsert(reviewToSave);
     }
+
 
     @Override
     @Transactional(readOnly = true)
@@ -62,22 +85,29 @@ public class ReviewServiceImpl extends CrudServiceImpl<Review, Long> implements 
         log.info("Processing approval request for review with ID '{}' by user with ID '{}'...",
                 review.getId(), userId);
 
-        // validate that the user exists
-        // TODO: Implement the required business logic here
+        // 1) Validate that the user exists
+        var user = userDataService.getById(userId);
 
-        // validate that the review exists
-        // TODO: Implement the required business logic here
+        // 2) Validate that the review exists (load the persisted review)
+        var existingReview = reviewDataService.getById(review.getId());
 
-        // a user cannot approve their own review
-        // TODO: Implement the required business logic here
+        // 3) A user cannot approve their own review
+        if (existingReview.author() != null
+                && existingReview.author().id() != null
+                && existingReview.author().id().equals(user.id())) {
+            throw new ValidationException("User cannot approve their own review");
+        }
 
-        // increment approval count
-        // TODO: Implement the required business logic here
+        // 4) Increment approval count
+        var updatedReview = existingReview.toBuilder()
+                .approvalCount(existingReview.approvalCount() + 1)
+                .build();
 
-        // update approval status to determine if the review now reaches the approval quorum
-        // TODO: Implement the required business logic here
+        // 5) Update approval status according to the configured threshold
+        updatedReview = updateApprovalStatus(updatedReview);
 
-        return reviewDataService.upsert(review);
+        // 6) Persist and return
+        return reviewDataService.upsert(updatedReview);
     }
 
     /**
@@ -93,10 +123,10 @@ public class ReviewServiceImpl extends CrudServiceImpl<Review, Long> implements 
                 .approved(isApproved(review))
                 .build();
     }
-    
+
     /**
      * Determines if a review meets the minimum approval threshold.
-     * 
+     *
      * @param review The review to check
      * @return true if the review meets or exceeds the minimum approval count, false otherwise
      */
